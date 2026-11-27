@@ -8,8 +8,6 @@
 <meta name="theme-color" content="#a4506f">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&family=Playfair+Display:wght@500;600;700&display=swap" rel="stylesheet">
-<!-- Supabase JS Client -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
 :root{
   --brand:#a4506f; --brand-d:#5e2a42; --brand-l:#fbeef3;
@@ -336,11 +334,6 @@ td .pi small{display:block;color:var(--muted);font-size:.76rem}
 <div class="toast" id="toast"></div>
 
 <script>
-/* ========= SUPABASE CONFIGURATION ========= */
-const SUPABASE_URL = 'https://pbpwtltrvtgzohbxbrll.supabase.co';
-const SUPABASE_KEY = 'sb_secret_zFWE9ka6vfOv0dWSaVQXTg_s3KQ91vb';
-const _supabase = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
-
 /* ========= icons ========= */
 const IC={
  cart:'<circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/>',
@@ -411,76 +404,63 @@ function art(k,c1,c2){
 let db = seed();
 const KEY='shop_db_v2', CK='shop_cart_v2';
 
-// Async Supabase Sync Engine
+/* ========= SUPABASE (REST) ========= */
+const SUPABASE_URL = 'https://pbpwtltrvtgzohbxbrll.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_MauVAPtRS6c_UZ8eOLmA-g_y-HTr0b4';
+
+// طلب عام لقاعدة البيانات (مع مهلة 8 ثواني حتى لا يتعلق الموقع)
+async function sbReq(path, method = 'GET', body = null) {
+  const headers = { 'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json' };
+  if (method === 'POST') headers['Prefer'] = 'resolution=merge-duplicates,return=minimal'; // إضافة أو تحديث إذا كان موجوداً
+  else if (method === 'DELETE') headers['Prefer'] = 'return=minimal';
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 8000);
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, { method, headers, body: body ? JSON.stringify(body) : null, signal: ctl.signal });
+    if (!res.ok) throw new Error(`Supabase ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    return method === 'GET' ? await res.json() : null;
+  } finally { clearTimeout(timer); }
+}
+
+// تنبيه واحد فقط عند فشل الحفظ في قاعدة البيانات
+let _dbWarned = false;
+function dbFail(e) {
+  console.warn('Supabase error:', e);
+  if (!_dbWarned) { _dbWarned = true; toast('تعذر الحفظ في قاعدة البيانات، تحقق من الاتصال'); setTimeout(() => _dbWarned = false, 8000); }
+}
+
+/* ---- قراءة ---- */
 async function fetchFromSupabase() {
   try {
-    const { data: pData } = await _supabase.from('products').select('*');
-    if (pData && pData.length > 0) {
+    const pData = await sbReq('products?select=*');
+    if (Array.isArray(pData) && pData.length > 0) {
       db.products = pData.map(p => ({
-        id: p.id,
-        sku: p.sku,
-        name: p.name,
-        price: p.price,
-        oldPrice: p.old_price,
-        cat: p.cat,
-        desc: p.desc,
-        imgs: p.imgs || [art('lip','#f7c3d3','#fde9ef')],
-        stock: p.stock,
-        on: p.on,
-        feat: p.feat,
+        id: p.id, sku: p.sku, name: p.name, price: p.price, oldPrice: p.old_price, cat: p.cat, desc: p.desc,
+        imgs: p.imgs || [art('lip','#f7c3d3','#fde9ef')], stock: p.stock, on: p.on, feat: p.feat,
         ts: p.created_at ? new Date(p.created_at).getTime() : Date.now()
       }));
     }
+    const sData = await sbReq('settings?select=*&id=eq.1');
+    if (Array.isArray(sData) && sData[0]?.data) db.settings = { ...db.settings, ...sData[0].data };
 
-    const { data: sData } = await _supabase.from('settings').select('*').eq('id', 1).single();
-    if (sData) {
-      db.settings = { ...db.settings, ...sData.data };
-    }
-
-    const { data: oData } = await _supabase.from('orders').select('*').order('created_at', { ascending: false });
-    if (oData) {
-      db.orders = oData.map(o => ({ ...o.order_data, id: o.id, status: o.status, date: o.created_at }));
-    }
-  } catch(e) {
-    console.warn('Supabase sync warning:', e);
-  }
+    const oData = await sbReq('orders?select=*&order=created_at.desc');
+    if (Array.isArray(oData)) db.orders = oData.map(o => ({ ...o.order_data, id: o.id, status: o.status, date: o.created_at }));
+  } catch (e) { console.warn('Supabase sync warning:', e); }
 }
 
+/* ---- كتابة ---- */
 async function syncProductToSupabase(p) {
   try {
-    await _supabase.from('products').upsert({
-      id: p.id,
-      sku: p.sku,
-      name: p.name,
-      price: p.price,
-      old_price: p.oldPrice || 0,
-      cat: p.cat,
-      desc: p.desc,
-      imgs: p.imgs,
-      stock: p.stock,
-      on: p.on,
-      feat: p.feat !== false
+    await sbReq('products?on_conflict=id', 'POST', {
+      id: p.id, sku: p.sku, name: p.name, price: p.price, old_price: p.oldPrice || 0, cat: p.cat, desc: p.desc,
+      imgs: p.imgs, stock: p.stock, on: p.on, feat: p.feat !== false
     });
-  } catch(e){}
+  } catch (e) { dbFail(e); }
 }
-
 async function syncOrderToSupabase(o) {
-  try {
-    await _supabase.from('orders').upsert({
-      id: o.id,
-      status: o.status,
-      order_data: o
-    });
-  } catch(e){}
+  try { await sbReq('orders?on_conflict=id', 'POST', { id: o.id, status: o.status, order_data: o }); } catch (e) { dbFail(e); }
 }
-
-async function syncSettingsToSupabase(s) {
-  try {
-    await _supabase.from('settings').upsert({
-      id: 1,
-      data: s
-    });
-  } catch(e){}
+async function syncSettingsToSupabase(st) {
+  try { await sbReq('settings?on_conflict=id', 'POST', { id: 1, data: st }); } catch (e) { dbFail(e); }
 }
 
 function save(){
@@ -764,7 +744,7 @@ async function pDel(id){
   if(confirm('حذف هذا المنتج نهائياً؟')){
     db.products=db.products.filter(p=>p.id!==id);
     save();
-    try { await _supabase.from('products').delete().eq('id', id); } catch(e){}
+    try { await sbReq('products?id=eq.' + encodeURIComponent(id), 'DELETE'); } catch(e){ dbFail(e); }
     aProducts();
     toast('تم حذف المنتج');
   }
@@ -844,7 +824,7 @@ async function oDel(id){
   if(confirm('حذف الطلب نهائياً؟')){
     db.orders=db.orders.filter(o=>o.id!==id);
     save();
-    try { await _supabase.from('orders').delete().eq('id', id); } catch(e){}
+    try { await sbReq('orders?id=eq.' + encodeURIComponent(id), 'DELETE'); } catch(e){ dbFail(e); }
     closeModal();renderAdmin();
   }
 }
